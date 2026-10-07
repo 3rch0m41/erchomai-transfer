@@ -262,12 +262,11 @@ La suite verifica i casi validi (round-trip di chunk, manifest e chiave nel link
 
 ## Roadmap
 
+- [ ] Improving GUI
 - [ ] Content Security Policy rigida
 - [ ] Rate limiting con `@fastify/rate-limit`
 - [ ] Deploy online con HTTPS
 - [ ] Password opzionale combinata con la chiave del link
-- [ ] Sottochiavi separate per chunk e manifest derivate con HKDF
-- [ ] Download in streaming su disco per superare il limite di memoria
 - [ ] Modalità utente → utente con scambio di chiavi ECDH e firme ECDSA
 
 ---
