@@ -286,7 +286,7 @@ La suite verifica i casi validi (round-trip di chunk, manifest e chiave nel link
 
 ## Roadmap
 
-- [ ] Improve the GUI
+- [X] Improve the GUI
 - [X] Content Security Policy rigida
 - [X] Rate limiting con `@fastify/rate-limit`
 - [ ] Deploy online con HTTPS
