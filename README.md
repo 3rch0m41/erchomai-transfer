@@ -21,6 +21,7 @@ Trasferimento di file con **cifratura end-to-end** nel browser. Il file viene ci
   - [Difese implementate](#difese-implementate)
     - [Server](#server)
     - [Client](#client)
+    - [Verifica della CSP](#verifica-della-csp)
   - [Limiti noti](#limiti-noti)
   - [Stack](#stack)
   - [Struttura del progetto](#struttura-del-progetto)
@@ -140,6 +141,7 @@ Il numero di chunk usato dal destinatario è quello del manifest autenticato, no
 - **ID non indovinabili**: 128 bit da `crypto.randomBytes`.
 - **Token di upload** da 256 bit: il server ne salva solo l'hash SHA-256 e lo confronta con `timingSafeEqual`.
 - **Validazione con JSON Schema** di parametri e corpi. ID e indici vengono controllati prima di diventare percorsi su disco, il che impedisce il path traversal.
+- **Rate limiting** con `@fastify/rate-limit`: 300 richieste al minuto per IP su tutte le rotte, ridotte a 10 al minuto per la creazione di trasferimenti, che è l'operazione che occupa spazio su disco.
 - **Limiti di dimensione**: 16 KB per i corpi JSON, 1 MiB + 16 byte per i chunk, al massimo 200 chunk per trasferimento.
 - **Content type rigidi**: sono accettati solo `application/json` e `application/octet-stream`.
 - **Trasferimenti immutabili**: dopo `complete` le scritture vengono rifiutate con `409`.
@@ -153,13 +155,35 @@ Il numero di chunk usato dal destinatario è quello del manifest autenticato, no
 - Il file ricevuto viene sempre salvato come `application/octet-stream`: il tipo MIME dichiarato dal mittente non viene mai usato, quindi un file HTML malevolo non viene interpretato nell'origine dell'app.
 - Il nome del file viene ripulito da caratteri di percorso e di controllo.
 - La chiave viene importata come non estraibile e rimossa dalla barra degli indirizzi.
+- **Content Security Policy rigida** nella build di produzione:
+  - `script-src 'self'` senza `'unsafe-inline'` né `'unsafe-eval'`: gli script inline iniettati e quelli caricati da domini esterni non vengono eseguiti.
+  - `connect-src 'self'`: `fetch`, XHR e WebSocket possono contattare solo il dominio dell'app, quindi un codice iniettato non può inviare la chiave o il file decifrato a un server esterno.
+  - `img-src 'self' data:`: impedisce l'esfiltrazione tramite "beacon" d'immagine verso domini esterni.
+  - La policy viene inserita come primo elemento di `<head>` da un plugin Vite attivo solo in build, perché in sviluppo l'hot reload di Vite richiede script inline.
+
+### Verifica della CSP
+
+Test eseguito nella console del browser sulla build di produzione: uno script caricato da un CDN e una richiesta verso un dominio esterno vengono entrambi bloccati.
+
+```js
+const s = document.createElement('script');
+s.src = 'https://cdn.jsdelivr.net/npm/lodash/lodash.min.js';
+document.head.append(s);
+fetch('https://example.com');
+```
+
+![Violazioni CSP: script esterno bloccato da script-src, connessione esterna bloccata da connect-src](docs/csp-blocco.png)
+
+Per ripetere il test conviene usare un browser senza estensioni, per esempio in una finestra in incognito. Estensioni e browser integrati negli editor iniettano stili e script propri, che la CSP segnala come violazioni pur non appartenendo all'app.
 
 ---
 
 ## Limiti noti
 
 - **Il link è la chiave.** Chi intercetta il link completo può scaricare e decifrare il file. Il canale con cui il link viene condiviso fa quindi parte del modello di sicurezza.
-- **Fiducia nel codice servito.** Come per ogni applicazione crittografica web, un server compromesso potrebbe servire un JavaScript modificato che esfiltra la chiave. Le mitigazioni previste (CSP rigida, nessuno script di terze parti, versione dell'app fissata dal service worker) riducono il rischio ma non lo eliminano.
+- **Fiducia nel codice servito.** Come per ogni applicazione crittografica web, un server compromesso potrebbe servire un JavaScript modificato che esfiltra la chiave. La CSP protegge da codice *iniettato* nella pagina, ma non da codice malevolo servito direttamente dall'origine.
+- **La CSP non copre la navigazione.** Un codice iniettato che riuscisse a eseguire potrebbe comunque reindirizzare la pagina verso un dominio esterno, portando dati nell'URL: nessuna direttiva CSP supportata dai browser lo impedisce. La difesa principale resta impedire l'esecuzione di codice iniettato, cosa che `script-src 'self'` fa.
+- **`frame-ancestors` non ancora attivo sul client.** La direttiva anti-clickjacking funziona solo come header HTTP, non dentro un meta tag. Verrà configurata negli header della piattaforma di deploy.
 - **Metadati visibili al server.** Il server vede la dimensione approssimativa del file (numero e dimensione dei chunk), gli orari e gli indirizzi IP delle richieste.
 - **Nessuna autenticazione del mittente.** Il destinatario sa che il file non è stato alterato dopo la cifratura, ma non può verificare chi lo ha inviato.
 - **Nessuna forward secrecy.** Chi ottiene il link prima della scadenza può decifrare il file.
@@ -262,11 +286,13 @@ La suite verifica i casi validi (round-trip di chunk, manifest e chiave nel link
 
 ## Roadmap
 
-- [ ] Improving GUI
-- [ ] Content Security Policy rigida
-- [ ] Rate limiting con `@fastify/rate-limit`
+- [ ] Improve the GUI
+- [X] Content Security Policy rigida
+- [X] Rate limiting con `@fastify/rate-limit`
 - [ ] Deploy online con HTTPS
 - [ ] Password opzionale combinata con la chiave del link
+- [ ] Sottochiavi separate per chunk e manifest derivate con HKDF
+- [ ] Download in streaming su disco per superare il limite di memoria
 - [ ] Modalità utente → utente con scambio di chiavi ECDH e firme ECDSA
 
 ---
