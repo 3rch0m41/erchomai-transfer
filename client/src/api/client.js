@@ -1,6 +1,7 @@
 const BASE = '/api/files';
 
 async function check(res) {
+  if (res.status === 429) throw new Error('Troppe richieste: riprova tra un minuto');
   if (!res.ok) {
     let msg = `Errore HTTP ${res.status}`;
     try { msg = (await res.json()).error ?? msg; } catch { /* corpo non JSON */ }
