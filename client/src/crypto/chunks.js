@@ -31,11 +31,15 @@ export async function decryptChunk(key, baseNonce, index, isLast, ciphertext) {
 
 // Cifra un File/Blob un chunk alla volta, senza caricarlo tutto in memoria
 export async function* encryptBlob(key, baseNonce, blob, chunkSize = CHUNK_SIZE) {
-  const total = Math.max(1, Math.ceil(blob.size / chunkSize));
+  const total = countChunks(blob.size, chunkSize);
   for (let index = 0; index < total; index++) {
     const start = index * chunkSize;
     const plain = await blob.slice(start, start + chunkSize).arrayBuffer();
     const data = await encryptChunk(key, baseNonce, index, index === total - 1, plain);
     yield { index, total, data };
   }
+}
+
+export function countChunks(size, chunkSize = CHUNK_SIZE) {
+  return Math.max(1, Math.ceil(size / chunkSize));
 }
