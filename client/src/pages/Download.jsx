@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { receiveFile, saveBlob } from '../transfer';
+import Shell from '../components/Shell';
+import { ReceiveExplainer } from '../components/Explainers';
+import Progress from '../components/Progress';
+import { LockIcon, CheckIcon } from '../components/Icons';
 
 export default function Download() {
   const { id } = useParams();
@@ -31,19 +35,38 @@ export default function Download() {
   }
 
   return (
-    <main>
-      <h1>Erchomai Transfer</h1>
-      <p>Hai ricevuto un file cifrato end-to-end.</p>
+    <Shell aside={<ReceiveExplainer />}>
+      <h1>Hai ricevuto un file</h1>
+      <p className="lead">
+        Il file è cifrato end-to-end. Verrà scaricato e decifrato qui, nel tuo browser.
+      </p>
 
-      {keyB64 && (
-        <button disabled={status === 'working' || status === 'done'} onClick={handleDownload}>
-          Scarica e decifra
+      <div className="file">
+        <div className="file-badge"><LockIcon /></div>
+        <div className="file-meta">
+          <div className="file-name">{status === 'done' ? fileName : 'File cifrato'}</div>
+          <div className="file-size">
+            {status === 'done' ? 'Decifrato e salvato' : 'Il nome compare dopo la decifratura'}
+          </div>
+        </div>
+      </div>
+
+      {keyB64 && status !== 'done' && (
+        <button className="btn" disabled={status === 'working'} onClick={handleDownload}>
+          {status === 'working' ? 'Decifratura in corso…' : 'Scarica e decifra'}
         </button>
       )}
 
-      {status === 'working' && <progress value={progress} max={1} />}
-      {status === 'done' && <p>«{fileName}» decifrato e salvato.</p>}
-      {status === 'error' && <p role="alert">{error}</p>}
-    </main>
+      {status === 'working' && <Progress value={progress} label="Download e verifica" />}
+
+      {status === 'done' && (
+        <section className="result">
+          <p className="ok"><CheckIcon /> Integrità verificata</p>
+          <p className="hint">Trovi «{fileName}» nella cartella dei download.</p>
+        </section>
+      )}
+
+      {status === 'error' && <p className="alert" role="alert">{error}</p>}
+    </Shell>
   );
 }
