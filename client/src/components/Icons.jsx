@@ -26,3 +26,9 @@ export const CloseIcon = (p) => (
 export const CheckIcon = (p) => (
   <svg {...base} {...p}><circle cx="12" cy="12" r="9" /><path d="M8.5 12.2l2.3 2.3 4.7-4.9" /></svg>
 );
+export const EyeIcon = (p) => (
+  <svg {...base} {...p}><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>
+);
+export const EyeOffIcon = (p) => (
+  <svg {...base} {...p}><path d="M3 3l18 18" /><path d="M10.6 5.1A10.7 10.7 0 0112 5c6.4 0 10 7 10 7a17.6 17.6 0 01-3.2 4.2M6.6 6.6C3.9 8.4 2 12 2 12s3.6 7 10 7a10 10 0 005.4-1.6" /><path d="M9.9 9.9a3 3 0 004.2 4.2" /></svg>
+);
