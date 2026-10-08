@@ -1,160 +1,151 @@
 # Erchomai Transfer
 
-Trasferimento di file con **cifratura end-to-end** nel browser. Il file viene cifrato sul dispositivo del mittente con la WebCrypto API, il server conserva solo blob opachi e il segreto da cui derivano le chiavi viaggia nel frammento del link, che il browser non invia mai al server. Una password facoltativa aggiunge un secondo fattore: senza di essa, il link da solo non basta a decifrare il file.
+**End-to-end encrypted** file transfer in the browser. Files are encrypted on the sender's device with the WebCrypto API, the server only stores opaque blobs, and the secret from which the keys are derived travels in the URL fragment, which browsers never send to the server. An optional password adds a second factor: without it, the link alone is not enough to decrypt the file.
 
-> **Progetto dimostrativo.** Il codice non è stato sottoposto ad audit di sicurezza indipendente e non va usato per dati reali sensibili.
+> **Demo project.** The code has not been independently audited and should not be used for real sensitive data.
 
----
-
-## Indice
-
-- [Erchomai Transfer](#erchomai-transfer)
-  - [Indice](#indice)
-  - [Come funziona](#come-funziona)
-  - [Architettura crittografica](#architettura-crittografica)
-    - [Derivazione delle chiavi](#derivazione-delle-chiavi)
-    - [Cifratura a chunk](#cifratura-a-chunk)
-    - [Manifest](#manifest)
-  - [Threat model](#threat-model)
-    - [Risorse da proteggere](#risorse-da-proteggere)
-    - [Attori e protezioni](#attori-e-protezioni)
-  - [Difese implementate](#difese-implementate)
-    - [Client](#client)
-    - [Server](#server)
-    - [Verifica della CSP](#verifica-della-csp)
-  - [Limiti noti](#limiti-noti)
-  - [Stack](#stack)
-  - [Struttura del progetto](#struttura-del-progetto)
-  - [Avvio in locale](#avvio-in-locale)
-  - [Test](#test)
-  - [API del server](#api-del-server)
-  - [Roadmap](#roadmap)
-  - [Autore](#autore)
+> 🇮🇹 [Versione italiana](README.it.md)
 
 ---
 
-## Come funziona
+## Table of contents
 
-1. Il mittente sceglie un file e, se vuole, una password. Il browser genera un **segreto casuale di 256 bit** e ne deriva due chiavi AES-256: una per i blocchi del file e una per il manifest.
-2. Il file viene cifrato a blocchi da 1 MiB. I blocchi cifrati e un **manifest cifrato** (nome, tipo, dimensione, numero di blocchi) vengono caricati sul server.
-3. L'app produce un link nella forma `https://<host>/d/<id>#<segreto>`, oppure `#p.<segreto>` se è stata impostata una password.
-4. Il destinatario apre il link: il browser legge il segreto dal frammento, chiede la password se necessaria, deriva le stesse chiavi, scarica i blocchi, li decifra e verifica l'integrità di ciascuno.
+- [How it works](#how-it-works)
+- [Cryptographic design](#cryptographic-design)
+- [Threat model](#threat-model)
+- [Implemented defenses](#implemented-defenses)
+- [Known limitations](#known-limitations)
+- [Stack](#stack)
+- [Project structure](#project-structure)
+- [Running locally](#running-locally)
+- [Tests](#tests)
+- [Server API](#server-api)
+- [Roadmap](#roadmap)
 
-Il frammento dopo `#` non fa parte della richiesta HTTP, quindi il server non riceve mai il segreto. La password viene comunicata al destinatario su un canale diverso da quello del link.
+---
+
+## How it works
+
+1. The sender picks a file and, optionally, a password. The browser generates a **random 256-bit secret** and derives two AES-256 keys from it: one for the file chunks and one for the manifest.
+2. The file is encrypted in 1 MiB chunks. The encrypted chunks and an **encrypted manifest** (name, type, size, chunk count) are uploaded to the server.
+3. The app produces a link of the form `https://<host>/d/<id>#<secret>`, or `#p.<secret>` when a password was set.
+4. The recipient opens the link: the browser reads the secret from the fragment, asks for the password if needed, derives the same keys, downloads the chunks, decrypts them and verifies the integrity of each one.
+
+The fragment after `#` is not part of the HTTP request, so the server never receives the secret. The password is shared with the recipient over a different channel than the link.
 
 ```mermaid
 sequenceDiagram
-    participant M as Mittente (browser)
-    participant S as Server
-    participant D as Destinatario (browser)
-    M->>M: genera il segreto e deriva le chiavi (HKDF, PBKDF2 se c'è una password)
-    M->>S: POST /api/files
-    S-->>M: id + uploadToken
-    loop per ogni chunk
-        M->>M: cifra il chunk con AES-GCM
-        M->>S: PUT /api/files/:id/chunks/:n
+    participant S as Sender (browser)
+    participant SV as Server
+    participant R as Recipient (browser)
+    S->>S: generate secret, derive keys (HKDF, plus PBKDF2 if a password is set)
+    S->>SV: POST /api/files
+    SV-->>S: id + uploadToken
+    loop for each chunk
+        S->>S: encrypt chunk with AES-GCM
+        S->>SV: PUT /api/files/:id/chunks/:n
     end
-    M->>S: PUT /api/files/:id/manifest
-    M->>S: POST /api/files/:id/complete
-    M-->>D: link con il segreto nel frammento (fuori banda)
-    M-->>D: password, se presente (su un altro canale)
-    D->>D: deriva le chiavi dal segreto e dalla password
-    D->>S: GET /api/files/:id
-    S-->>D: manifest cifrato
-    loop per ogni chunk
-        D->>S: GET /api/files/:id/chunks/:n
-        D->>D: decifra e verifica
+    S->>SV: PUT /api/files/:id/manifest
+    S->>SV: POST /api/files/:id/complete
+    S-->>R: link with the secret in the fragment (out of band)
+    S-->>R: password, if any (over another channel)
+    R->>R: derive keys from secret and password
+    R->>SV: GET /api/files/:id
+    SV-->>R: encrypted manifest
+    loop for each chunk
+        R->>SV: GET /api/files/:id/chunks/:n
+        R->>R: decrypt and verify
     end
 ```
 
 ---
 
-## Architettura crittografica
+## Cryptographic design
 
-Sono usate solo primitive standard esposte da `crypto.subtle`. Nessuna primitiva è implementata a mano.
+Only standard primitives exposed by `crypto.subtle` are used. No primitive is implemented by hand.
 
-| Elemento | Scelta | Motivazione |
+| Element | Choice | Rationale |
 | --- | --- | --- |
-| Segreto | 256 bit casuali, uno per trasferimento | Materiale di partenza ad alta entropia, mai riusato |
-| Trasporto del segreto | Frammento dell'URL, codifica base64url | Non viene inviato al server con la richiesta HTTP |
-| Derivazione delle chiavi | HKDF-SHA256, `info` = `erchomai/v2/chunks` ed `erchomai/v2/manifest` | Una chiave per ogni uso (separazione dei domini) |
-| Password facoltativa | PBKDF2-SHA256, 600.000 iterazioni, salt = segreto del link | Rende costoso ogni tentativo; il salt è unico per trasferimento senza memorizzare nulla in più |
-| Cifratura | AES-256-GCM | Cifratura autenticata: riservatezza e integrità in un'unica operazione |
-| Dimensione dei chunk | 1 MiB | Il file non deve stare tutto in memoria durante la cifratura |
-| IV dei chunk | Nonce di base di 96 bit casuali, con gli ultimi 32 bit in XOR con l'indice del chunk | IV unico per ogni chunk sotto la stessa chiave |
-| AAD dei chunk | Indice del chunk (4 byte, big-endian) e flag "ultimo chunk" (1 byte) | Lega ogni chunk alla sua posizione e rende rilevabile il troncamento |
-| Manifest | JSON cifrato con la chiave dedicata, IV casuale di 96 bit, AAD `erchomai-manifest-v1` | Il server non conosce nome, tipo o dimensione esatta del file |
+| Secret | 256 random bits, one per transfer | High-entropy starting material, never reused |
+| Secret transport | URL fragment, base64url-encoded | Not sent to the server with the HTTP request |
+| Key derivation | HKDF-SHA256, `info` = `erchomai/v2/chunks` and `erchomai/v2/manifest` | One key per purpose (domain separation) |
+| Optional password | PBKDF2-SHA256, 600,000 iterations, salt = link secret | Makes every guess expensive; the salt is unique per transfer with nothing extra to store |
+| Encryption | AES-256-GCM | Authenticated encryption: confidentiality and integrity in one operation |
+| Chunk size | 1 MiB | The file never has to fit in memory during encryption |
+| Chunk IV | 96-bit random base nonce, last 32 bits XORed with the chunk index | Unique IV for every chunk under the same key |
+| Chunk AAD | Chunk index (4 bytes, big-endian) and "last chunk" flag (1 byte) | Binds each chunk to its position and makes truncation detectable |
+| Manifest | JSON encrypted with its dedicated key, random 96-bit IV, AAD `erchomai-manifest-v1` | The server does not learn the file's name, type or exact size |
 
-### Derivazione delle chiavi
-
-```
-segreto        = 32 byte casuali                                   (nel frammento del link)
-pw             = PBKDF2-SHA256(password, salt = segreto, 600.000)  (solo con password)
-ikm            = segreto                oppure   segreto || pw
-chiaveChunk    = HKDF-SHA256(ikm, info = "erchomai/v2/chunks")
-chiaveManifest = HKDF-SHA256(ikm, info = "erchomai/v2/manifest")
-```
-
-- Le due chiavi sono indipendenti: un ciphertext prodotto con una non può essere decifrato con l'altra.
-- La password viene normalizzata in Unicode NFC prima della derivazione, così la stessa password produce gli stessi byte su sistemi diversi.
-- Tutte le chiavi sono **non estraibili**, sia per il mittente sia per il destinatario: nemmeno il JavaScript della pagina può rileggerne i byte. Nel link viaggia il segreto, non una chiave.
-
-### Cifratura a chunk
-
-Ogni chunk viene cifrato in modo indipendente, ma è legato crittograficamente alla sua posizione nel file:
+### Key derivation
 
 ```
-IV_n  = nonce_base XOR (0x00…00 || n)          // n = indice del chunk, 32 bit
+secret       = 32 random bytes                                    (in the link fragment)
+pw           = PBKDF2-SHA256(password, salt = secret, 600,000)    (only with a password)
+ikm          = secret                 or   secret || pw
+chunkKey     = HKDF-SHA256(ikm, info = "erchomai/v2/chunks")
+manifestKey  = HKDF-SHA256(ikm, info = "erchomai/v2/manifest")
+```
+
+- The two keys are independent: ciphertext produced with one cannot be decrypted with the other.
+- The password is normalized to Unicode NFC before derivation, so the same password yields the same bytes across systems.
+- All keys are **non-extractable**, for both sender and recipient: not even the page's own JavaScript can read their bytes. The link carries the secret, never a key.
+
+### Chunked encryption
+
+Each chunk is encrypted independently but cryptographically bound to its position in the file:
+
+```
+IV_n  = base_nonce XOR (0x00…00 || n)          // n = chunk index, 32 bits
 AAD_n = n (uint32, big-endian) || isLast (1 byte)
-C_n   = AES-256-GCM(chiaveChunk, IV_n, AAD_n, P_n)
+C_n   = AES-256-GCM(chunkKey, IV_n, AAD_n, P_n)
 ```
 
-Questo schema, una versione semplificata della costruzione STREAM, rende rilevabili tre attacchi:
+This scheme, a simplified version of the STREAM construction, makes three attacks detectable:
 
-- **Riordino.** Un chunk spostato in un'altra posizione viene decifrato con un indice diverso, quindi IV e AAD non corrispondono e la verifica GCM fallisce.
-- **Troncamento.** Il destinatario decifra l'ultimo chunk atteso con `isLast = 1`. Se il server elimina i chunk finali, il nuovo "ultimo" era stato cifrato con `isLast = 0` e la verifica fallisce.
-- **Alterazione.** Qualsiasi modifica di un byte invalida il tag di autenticazione di 128 bit.
+- **Reordering.** A chunk moved to another position is decrypted with a different index, so IV and AAD do not match and GCM verification fails.
+- **Truncation.** The recipient decrypts the last expected chunk with `isLast = 1`. If the server drops the final chunks, the new "last" one was encrypted with `isLast = 0` and verification fails.
+- **Tampering.** Changing any single byte invalidates the 128-bit authentication tag.
 
 ### Manifest
 
-Il manifest contiene `v`, `name`, `type`, `size`, `chunkCount` e il nonce di base dei chunk. Viene cifrato con la chiave dedicata e serializzato come `IV || ciphertext` in base64url.
+The manifest holds `v`, `name`, `type`, `size`, `chunkCount` and the chunks' base nonce. It is encrypted with its dedicated key and serialized as `IV || ciphertext` in base64url.
 
-Il numero di chunk usato dal destinatario è quello del manifest autenticato, non quello dichiarato dal server. Un'incoerenza tra i due viene segnalata come anomalia. Dopo la decifratura, la struttura del manifest viene comunque validata.
+The chunk count used by the recipient comes from the authenticated manifest, not from the server's response. Any mismatch between the two is reported as an anomaly. After decryption, the manifest's structure is still validated.
 
-Il manifest è anche il primo elemento decifrato dal destinatario: una password errata viene rilevata qui, prima di scaricare qualsiasi chunk.
+The manifest is also the first thing the recipient decrypts: a wrong password is detected here, before any chunk is downloaded.
 
 ---
 
 ## Threat model
 
-### Risorse da proteggere
+### Assets
 
-- Il contenuto del file.
-- I metadati del file: nome, tipo e dimensione esatta.
-- L'integrità del file ricevuto.
+- The file contents.
+- The file metadata: name, type and exact size.
+- The integrity of the received file.
 
-### Attori e protezioni
+### Actors and protections
 
-| Attore | Capacità | Protetto? | Come |
+| Actor | Capability | Protected? | How |
 | --- | --- | --- | --- |
-| Server curioso (honest-but-curious) | Legge tutto ciò che conserva | Sì | Riceve solo chunk e manifest cifrati, mai il segreto né la password |
-| Server malevolo sui dati | Altera, riordina, tronca o sostituisce i chunk | Sì, rilevato | AES-GCM con indice e flag di fine nell'AAD; numero di chunk dal manifest autenticato |
-| Attaccante di rete | Intercetta il traffico | Sì | HTTPS in produzione, più la cifratura end-to-end |
-| Terzo che conosce un ID | Prova a scrivere in un trasferimento altrui | Sì | Token di upload a 256 bit, richiesto per ogni scrittura |
-| Terzo senza link | Prova a indovinare un ID | Sì | ID casuali a 128 bit e rate limiting |
-| Codice iniettato nella pagina (XSS) | Prova a caricare script esterni o a inviare dati altrove | Sì, in larga parte | CSP rigida: `script-src 'self'` e `connect-src 'self'` |
-| Chi intercetta il link, file **senza** password | Ottiene l'URL completo | **No** | Il link contiene il segreto: basta a decifrare |
-| Chi intercetta il link, file **con** password | Ottiene l'URL completo | Parzialmente | Serve anche la password; resta possibile un attacco a dizionario offline |
-| Server malevolo sul codice | Serve un JavaScript modificato | **No** | Limite strutturale della crittografia web, vedi sotto |
-| Dispositivo compromesso | Malware sul client del mittente o del destinatario | **No** | Fuori dall'ambito di una web app |
+| Curious server (honest-but-curious) | Reads everything it stores | Yes | Receives only encrypted chunks and manifest, never the secret or the password |
+| Server malicious on data | Alters, reorders, truncates or replaces chunks | Yes, detected | AES-GCM with index and end flag in the AAD; chunk count from the authenticated manifest |
+| Network attacker | Intercepts traffic | Yes | HTTPS in production, plus end-to-end encryption |
+| Third party who knows an ID | Tries to write into someone else's transfer | Yes | 256-bit upload token required for every write |
+| Third party without the link | Tries to guess an ID | Yes | Random 128-bit IDs and rate limiting |
+| Code injected into the page (XSS) | Tries to load external scripts or send data elsewhere | Largely | Strict CSP: `script-src 'self'` and `connect-src 'self'` |
+| Link interceptor, file **without** password | Obtains the full URL | **No** | The link contains the secret, which is enough to decrypt |
+| Link interceptor, file **with** password | Obtains the full URL | Partially | The password is also required; an offline dictionary attack remains possible |
+| Server malicious on code | Serves modified JavaScript | **No** | Structural limit of web cryptography, see below |
+| Compromised device | Malware on the sender's or recipient's machine | **No** | Out of scope for a web app |
 
 ---
 
-## Difese implementate
+## Implemented defenses
 
 ### Client
 
-- **Content Security Policy rigida** nella build di produzione:
+- **Strict Content Security Policy** in the production build:
 
   ```
   default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
@@ -162,33 +153,33 @@ Il manifest è anche il primo elemento decifrato dal destinatario: una password 
   base-uri 'none'; form-action 'none'; object-src 'none'
   ```
 
-  - `script-src 'self'` senza `'unsafe-inline'` né `'unsafe-eval'`: gli script inline iniettati e quelli caricati da domini esterni non vengono eseguiti.
-  - `connect-src 'self'`: `fetch`, XHR e WebSocket possono contattare solo il dominio dell'app, quindi un codice iniettato non può inviare il segreto o il file decifrato a un server esterno.
-  - `img-src 'self' data:`: impedisce l'esfiltrazione tramite "beacon" d'immagine verso domini esterni.
-  - La policy viene inserita come primo elemento di `<head>` da un plugin Vite attivo solo in build, perché in sviluppo l'hot reload di Vite richiede script inline.
-- **Chiavi non estraibili** e derivate per uso, con segreto e password che non lasciano mai il browser.
-- **Password facoltativa** di almeno 8 caratteri, rafforzata con PBKDF2 a 600.000 iterazioni. Viene cancellata dallo stato dell'interfaccia subito dopo l'uso.
-- Il numero di chunk viene preso dal manifest autenticato, non dal server.
-- Gli errori di integrità indicano quale chunk ha fallito la verifica.
-- Il file ricevuto viene sempre salvato come `application/octet-stream`: il tipo MIME dichiarato dal mittente non viene mai usato, quindi un file HTML malevolo non viene interpretato nell'origine dell'app.
-- Il nome del file viene ripulito da caratteri di percorso e di controllo.
-- Il segreto viene rimosso dalla barra degli indirizzi subito dopo la lettura.
+  - `script-src 'self'` without `'unsafe-inline'` or `'unsafe-eval'`: injected inline scripts and scripts loaded from external domains do not run.
+  - `connect-src 'self'`: `fetch`, XHR and WebSocket can only reach the app's own origin, so injected code cannot send the secret or the decrypted file to an external server.
+  - `img-src 'self' data:`: prevents exfiltration through image "beacons" to external domains.
+  - The policy is inserted as the first element of `<head>` by a Vite plugin that runs only at build time, because Vite's hot reload needs inline scripts during development.
+- **Non-extractable keys**, derived per purpose; the secret and the password never leave the browser.
+- **Optional password** of at least 8 characters, strengthened with 600,000 PBKDF2 iterations. It is cleared from the UI state right after use.
+- The chunk count is taken from the authenticated manifest, not from the server.
+- Integrity errors report which chunk failed verification.
+- The received file is always saved as `application/octet-stream`: the MIME type declared by the sender is never used, so a malicious HTML file is never rendered in the app's origin.
+- The file name is stripped of path and control characters.
+- The secret is removed from the address bar immediately after being read.
 
 ### Server
 
-- **ID non indovinabili**: 128 bit da `crypto.randomBytes`.
-- **Token di upload** da 256 bit: il server ne salva solo l'hash SHA-256 e lo confronta con `timingSafeEqual`.
-- **Validazione con JSON Schema** di parametri e corpi. ID e indici vengono controllati prima di diventare percorsi su disco, il che impedisce il path traversal.
-- **Rate limiting** con `@fastify/rate-limit`: 300 richieste al minuto per IP su tutte le rotte, ridotte a 10 al minuto per la creazione di trasferimenti, che è l'operazione che occupa spazio su disco.
-- **Limiti di dimensione**: 16 KB per i corpi JSON, 1 MiB + 16 byte per i chunk, al massimo 200 chunk per trasferimento.
-- **Content type rigidi**: sono accettati solo `application/json` e `application/octet-stream`.
-- **Trasferimenti immutabili**: dopo `complete` le scritture vengono rifiutate con `409`.
-- **Scadenza automatica** dopo 24 ore, con pulizia ogni 10 minuti.
-- **Header difensivi** su ogni risposta: `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` e `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, perché l'API restituisce solo dati e non contenuti da eseguire o incorniciare.
+- **Unguessable IDs**: 128 bits from `crypto.randomBytes`.
+- **256-bit upload token**: the server stores only its SHA-256 hash and compares it with `timingSafeEqual`.
+- **JSON Schema validation** of parameters and bodies. IDs and indexes are checked before they become paths on disk, which rules out path traversal.
+- **Rate limiting** with `@fastify/rate-limit`: 300 requests per minute per IP on all routes, reduced to 10 per minute for transfer creation, the operation that consumes disk space.
+- **Size limits**: 16 KB for JSON bodies, 1 MiB + 16 bytes for chunks, at most 200 chunks per transfer.
+- **Strict content types**: only `application/json` and `application/octet-stream` are accepted.
+- **Immutable transfers**: after `complete`, writes are rejected with `409`.
+- **Automatic expiry** after 24 hours, with cleanup every 10 minutes.
+- **Defensive headers** on every response: `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, since the API only returns data, never content to execute or frame.
 
-### Verifica della CSP
+### CSP verification
 
-Test eseguito nella console del browser sulla build di produzione: uno script caricato da un CDN e una richiesta verso un dominio esterno vengono entrambi bloccati.
+Test run in the browser console against the production build: a script loaded from a CDN and a request to an external domain are both blocked.
 
 ```js
 const s = document.createElement('script');
@@ -197,54 +188,54 @@ document.head.append(s);
 fetch('https://example.com');
 ```
 
-![Violazioni CSP: script esterno bloccato da script-src, connessione esterna bloccata da connect-src](docs/csp-blocco.png)
+![CSP violations: external script blocked by script-src, external connection blocked by connect-src](docs/csp-blocco.png)
 
-Per ripetere il test conviene usare un browser senza estensioni, per esempio in una finestra in incognito. Estensioni e browser integrati negli editor iniettano stili e script propri, che la CSP segnala come violazioni pur non appartenendo all'app.
+To repeat the test, use a browser without extensions, for example an incognito window. Extensions and browsers embedded in code editors inject their own styles and scripts, which the CSP reports as violations even though they do not belong to the app.
 
 ---
 
-## Limiti noti
+## Known limitations
 
-- **Senza password, il link è la chiave.** Chi intercetta il link completo può scaricare e decifrare il file. Il canale con cui il link viene condiviso fa quindi parte del modello di sicurezza.
-- **Con password, resta possibile un attacco a dizionario offline.** Chi possiede il link può scaricare il manifest cifrato e provare password senza contattare di nuovo il server, quindi il rate limiting non lo rallenta. La protezione dipende dalla robustezza della password e dal costo di PBKDF2.
-- **PBKDF2 non è memory-hard.** Argon2id sarebbe più resistente agli attacchi con GPU, ma non è disponibile nella WebCrypto API e richiederebbe una libreria esterna.
-- **Fiducia nel codice servito.** Come per ogni applicazione crittografica web, un server compromesso potrebbe servire un JavaScript modificato che esfiltra segreto e password. La CSP protegge da codice *iniettato* nella pagina, ma non da codice malevolo servito direttamente dall'origine.
-- **La CSP non copre la navigazione.** Un codice iniettato che riuscisse a eseguire potrebbe comunque reindirizzare la pagina verso un dominio esterno, portando dati nell'URL: nessuna direttiva CSP supportata dai browser lo impedisce. La difesa principale resta impedire l'esecuzione di codice iniettato, cosa che `script-src 'self'` fa.
-- **`frame-ancestors` non ancora attivo sul client.** La direttiva anti-clickjacking funziona solo come header HTTP, non dentro un meta tag. Verrà configurata negli header della piattaforma di deploy.
-- **Metadati visibili al server.** Il server vede la dimensione approssimativa del file (numero e dimensione dei chunk), gli orari e gli indirizzi IP delle richieste.
-- **Nessuna autenticazione del mittente.** Il destinatario sa che il file non è stato alterato dopo la cifratura, ma non può verificare chi lo ha inviato.
-- **Nessuna forward secrecy.** Chi ottiene link e password prima della scadenza può decifrare il file.
-- **Decifratura in memoria.** Il file decifrato viene ricomposto in un `Blob`, per questo la dimensione massima è limitata a 200 MiB.
+- **Without a password, the link is the key.** Anyone who intercepts the full link can download and decrypt the file. The channel used to share the link is therefore part of the security model.
+- **With a password, an offline dictionary attack is still possible.** Whoever holds the link can download the encrypted manifest and try passwords without contacting the server again, so rate limiting does not slow them down. Protection depends on password strength and on the cost of PBKDF2.
+- **PBKDF2 is not memory-hard.** Argon2id would resist GPU attacks better, but it is not available in the WebCrypto API and would require an external library.
+- **Trust in the served code.** As with any web-based cryptographic application, a compromised server could serve modified JavaScript that exfiltrates the secret and the password. The CSP protects against code *injected* into the page, not against malicious code served directly by the origin.
+- **The CSP does not cover navigation.** Injected code that managed to run could still redirect the page to an external domain, carrying data in the URL: no CSP directive supported by browsers prevents this. The main defense remains preventing injected code from executing, which `script-src 'self'` does.
+- **`frame-ancestors` not yet active on the client.** The anti-clickjacking directive only works as an HTTP header, not inside a meta tag. It will be configured in the deployment platform's headers.
+- **Metadata visible to the server.** The server sees the approximate file size (number and size of chunks), request times and IP addresses.
+- **No sender authentication.** The recipient knows the file was not altered after encryption, but cannot verify who sent it.
+- **No forward secrecy.** Anyone who obtains the link and password before expiry can decrypt the file.
+- **In-memory decryption.** The decrypted file is reassembled into a `Blob`, which is why the maximum size is limited to 200 MiB.
 
 ---
 
 ## Stack
 
-| Livello | Tecnologie |
+| Layer | Technologies |
 | --- | --- |
 | Client | React, Vite, `vite-plugin-pwa`, React Router |
-| Crittografia | WebCrypto API (`crypto.subtle`), senza librerie esterne |
+| Cryptography | WebCrypto API (`crypto.subtle`), no external libraries |
 | Server | Node.js, Fastify, `@fastify/rate-limit` |
-| Archiviazione | Filesystem locale |
-| Test | Vitest |
+| Storage | Local filesystem |
+| Tests | Vitest |
 
 ---
 
-## Struttura del progetto
+## Project structure
 
 ```
 erchomai-transfer/
 ├── docs/
-│   └── csp-blocco.png         # prova del blocco CSP
+│   └── csp-blocco.png         # proof of CSP blocking
 ├── client/
-│   ├── vite.config.js         # PWA, proxy di sviluppo, plugin CSP
+│   ├── vite.config.js         # PWA, dev proxy, CSP plugin
 │   └── src/
 │       ├── App.jsx            # router
-│       ├── transfer.js        # orchestrazione invio/ricezione
-│       ├── api/client.js      # chiamate HTTP
-│       ├── crypto/            # solo crypto.subtle, testabile in Node
+│       ├── transfer.js        # send/receive orchestration
+│       ├── api/client.js      # HTTP calls
+│       ├── crypto/            # crypto.subtle only, testable in Node
 │       │   ├── encoding.js
-│       │   ├── keys.js        # segreto, HKDF, PBKDF2, frammento del link
+│       │   ├── keys.js        # secret, HKDF, PBKDF2, link fragment
 │       │   ├── chunks.js
 │       │   ├── manifest.js
 │       │   ├── keys.test.js
@@ -254,18 +245,18 @@ erchomai-transfer/
 │           ├── Upload.jsx
 │           └── Download.jsx
 └── server/
-    ├── storage/               # blob cifrati (esclusi da Git)
+    ├── storage/               # encrypted blobs (excluded from Git)
     └── src/
-        ├── index.js           # avvio, rate limiting, header difensivi
+        ├── index.js           # startup, rate limiting, defensive headers
         ├── storage.js
         └── routes/files.js
 ```
 
 ---
 
-## Avvio in locale
+## Running locally
 
-Requisiti: **Node.js 20 o superiore**.
+Requirements: **Node.js 20 or later**.
 
 ```bash
 # server
@@ -273,15 +264,15 @@ cd server
 npm install
 npm run dev        # http://127.0.0.1:3000
 
-# client, in un secondo terminale
+# client, in a second terminal
 cd client
 npm install
 npm run dev        # http://localhost:5173
 ```
 
-In sviluppo, Vite inoltra le richieste `/api` al server. La WebCrypto API richiede un contesto sicuro: `localhost` in sviluppo, HTTPS in produzione.
+In development, Vite proxies `/api` requests to the server. The WebCrypto API requires a secure context: `localhost` in development, HTTPS in production.
 
-Per provare la build di produzione con la CSP attiva:
+To try the production build with the CSP enabled:
 
 ```bash
 cd client
@@ -291,53 +282,53 @@ npm run preview    # http://localhost:4173
 
 ---
 
-## Test
+## Tests
 
 ```bash
 cd client
 npm test
 ```
 
-La suite verifica i casi validi (round-trip di chunk, manifest e frammento del link, derivazione deterministica delle chiavi) e soprattutto i casi di attacco, che devono essere **rifiutati**:
+The suite covers the valid cases (round-trips of chunks, manifest and link fragment, deterministic key derivation) and, above all, the attack cases, which must be **rejected**:
 
-- chunk riordinato;
-- file troncato;
-- byte alterato in un chunk o nel manifest;
-- chiave o password errata;
-- segreto di lunghezza non valida nel link;
-- uso della chiave di un dominio nell'altro (chunk e manifest);
-- tentativo di esportare una chiave non estraibile;
-- manifest con struttura non valida.
+- reordered chunk;
+- truncated file;
+- altered byte in a chunk or in the manifest;
+- wrong key or wrong password;
+- secret of invalid length in the link;
+- using one domain's key in the other (chunks vs manifest);
+- attempting to export a non-extractable key;
+- manifest with an invalid structure.
 
 ---
 
-## API del server
+## Server API
 
-| Metodo | Endpoint | Autorizzazione | Descrizione |
+| Method | Endpoint | Authorization | Description |
 | --- | --- | --- | --- |
-| `POST` | `/api/files` | nessuna (max 10/min per IP) | Crea un trasferimento e restituisce `id`, `uploadToken` ed `expiresAt` |
-| `PUT` | `/api/files/:id/chunks/:n` | `Bearer <uploadToken>` | Carica il chunk cifrato `n` |
-| `PUT` | `/api/files/:id/manifest` | `Bearer <uploadToken>` | Carica il manifest cifrato |
-| `POST` | `/api/files/:id/complete` | `Bearer <uploadToken>` | Verifica che manifest e chunk siano presenti e chiude il trasferimento |
-| `GET` | `/api/files/:id` | nessuna | Restituisce manifest cifrato, numero di chunk e scadenza |
-| `GET` | `/api/files/:id/chunks/:n` | nessuna | Scarica il chunk cifrato `n` |
+| `POST` | `/api/files` | none (max 10/min per IP) | Creates a transfer and returns `id`, `uploadToken` and `expiresAt` |
+| `PUT` | `/api/files/:id/chunks/:n` | `Bearer <uploadToken>` | Uploads encrypted chunk `n` |
+| `PUT` | `/api/files/:id/manifest` | `Bearer <uploadToken>` | Uploads the encrypted manifest |
+| `POST` | `/api/files/:id/complete` | `Bearer <uploadToken>` | Checks that manifest and chunks are present and closes the transfer |
+| `GET` | `/api/files/:id` | none | Returns the encrypted manifest, chunk count and expiry |
+| `GET` | `/api/files/:id/chunks/:n` | none | Downloads encrypted chunk `n` |
 
-Tutte le rotte sono soggette al limite globale di 300 richieste al minuto per IP. Oltre il limite il server risponde `429`.
+All routes are subject to the global limit of 300 requests per minute per IP. Beyond that, the server responds with `429`.
 
 ---
 
 ## Roadmap
 
-- [x] Content Security Policy rigida
-- [x] Rate limiting con `@fastify/rate-limit`
-- [x] Password opzionale combinata con il segreto del link
-- [x] Sottochiavi separate per chunk e manifest derivate con HKDF
-- [ ] Download in streaming su disco per superare il limite di memoria
-- [ ] Deploy online con HTTPS, con CSP e `frame-ancestors` come header HTTP
-- [ ] Modalità utente → utente con scambio di chiavi ECDH e firme ECDSA
+- [x] Strict Content Security Policy
+- [x] Rate limiting with `@fastify/rate-limit`
+- [x] Optional password combined with the link secret
+- [x] Separate subkeys for chunks and manifest derived with HKDF
+- [ ] Streaming download to disk to lift the memory limit
+- [ ] Online deployment with HTTPS, with CSP and `frame-ancestors` as HTTP headers
+- [ ] User-to-user mode with ECDH key exchange and ECDSA signatures
 
 ---
 
-## Autore
+## Author
 
-**Giulio Malini** ("Erchomai"), progetto personale di sicurezza applicativa con orientamento Blue Team.
+**Giulio Malini** ("Erchomai"), personal application-security project with a Blue Team focus.
