@@ -1,13 +1,14 @@
 import { describe, test, expect } from 'vitest';
 import { toBase64Url, fromBase64Url } from './encoding.js';
-import { generateFileKey, exportFileKey, importFileKey, generateBaseNonce } from './keys.js';
+import { generateSecret, deriveKeys, generateBaseNonce } from './keys.js';
 import { deriveIv, encryptChunk, decryptChunk, encryptBlob } from './chunks.js';
 
 const enc = (s) => new TextEncoder().encode(s);
 const dec = (b) => new TextDecoder().decode(b);
+const newKey = async () => (await deriveKeys(generateSecret())).chunkKey;
 
 async function setup() {
-  const key = await generateFileKey();
+  const key = await newKey();
   const nonce = generateBaseNonce();
   const c0 = await encryptChunk(key, nonce, 0, false, enc('primo'));
   const c1 = await encryptChunk(key, nonce, 1, true, enc('ultimo'));
@@ -54,26 +55,13 @@ describe('chunk: attacchi rifiutati', () => {
 
   test('chiave sbagliata', async () => {
     const { nonce, c0 } = await setup();
-    const other = await generateFileKey();
-    await expect(decryptChunk(other, nonce, 0, false, c0)).rejects.toThrow();
-  });
-});
-
-describe('chiave nel link', () => {
-  test('export e import', async () => {
-    const { key, nonce, c0 } = await setup();
-    const imported = await importFileKey(await exportFileKey(key));
-    expect(dec(await decryptChunk(imported, nonce, 0, false, c0))).toBe('primo');
-  });
-
-  test('chiave di lunghezza errata', async () => {
-    await expect(importFileKey(toBase64Url(new Uint8Array(16)))).rejects.toThrow();
+    await expect(decryptChunk(await newKey(), nonce, 0, false, c0)).rejects.toThrow();
   });
 });
 
 describe('encryptBlob', () => {
   test('file diviso su più chunk', async () => {
-    const key = await generateFileKey();
+    const key = await newKey();
     const nonce = generateBaseNonce();
     const blob = new Blob([enc('abcdefghij')]);
     const out = [];

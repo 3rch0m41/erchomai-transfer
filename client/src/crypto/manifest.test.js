@@ -1,12 +1,13 @@
 import { describe, test, expect } from 'vitest';
-import { generateFileKey, generateBaseNonce } from './keys.js';
+import { generateSecret, deriveKeys, generateBaseNonce } from './keys.js';
 import { buildManifest, encryptManifest, decryptManifest } from './manifest.js';
 import { toBase64Url, fromBase64Url } from './encoding.js';
 
 const fakeFile = { name: 'report.pdf', type: 'application/pdf', size: 3_000_000 };
+const newKey = async () => (await deriveKeys(generateSecret())).manifestKey;
 
 async function setup() {
-  const key = await generateFileKey();
+  const key = await newKey();
   const manifest = buildManifest(fakeFile, generateBaseNonce(), 3);
   return { key, manifest, enc: await encryptManifest(key, manifest) };
 }
@@ -26,11 +27,11 @@ describe('manifest', () => {
 
   test('chiave sbagliata → rifiutato', async () => {
     const { enc } = await setup();
-    await expect(decryptManifest(await generateFileKey(), enc)).rejects.toThrow();
+    await expect(decryptManifest(await newKey(), enc)).rejects.toThrow();
   });
 
   test('struttura non valida → rifiutata', async () => {
-    const key = await generateFileKey();
+    const key = await newKey();
     const enc = await encryptManifest(key, { v: 1, name: '', chunkCount: 0 });
     await expect(decryptManifest(key, enc)).rejects.toThrow('Struttura del manifest non valida');
   });

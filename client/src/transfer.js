@@ -1,47 +1,60 @@
-import { generateFileKey, exportFileKey, importFileKey, generateBaseNonce } from './crypto/keys.js';
+import { generateSecret, deriveKeys, generateBaseNonce, encodeFragment, decodeFragment } from './crypto/keys.js';
 import { encryptBlob, decryptChunk, countChunks, CHUNK_SIZE } from './crypto/chunks.js';
 import { buildManifest, encryptManifest, decryptManifest } from './crypto/manifest.js';
 import { fromBase64Url } from './crypto/encoding.js';
 import * as api from './api/client.js';
 
 export const MAX_FILE_SIZE = 200 * CHUNK_SIZE; // coerente con MAX_CHUNKS del server
+export const MIN_PASSWORD_LENGTH = 8;
 
-export async function sendFile(file, onProgress = () => {}) {
+export function fragmentNeedsPassword(fragment) {
+  return fragment.startsWith('p.');
+}
+
+export async function sendFile(file, password = '', onProgress = () => {}) {
   if (file.size > MAX_FILE_SIZE) throw new Error('File troppo grande (massimo 200 MB)');
+  if (password && password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`La password deve avere almeno ${MIN_PASSWORD_LENGTH} caratteri`);
+  }
 
-  const key = await generateFileKey();
+  const secret = generateSecret();
+  const { chunkKey, manifestKey } = await deriveKeys(secret, password);
   const baseNonce = generateBaseNonce();
   const chunkCount = countChunks(file.size);
   const { id, uploadToken } = await api.createTransfer();
 
-  for await (const { index, data } of encryptBlob(key, baseNonce, file)) {
+  for await (const { index, data } of encryptBlob(chunkKey, baseNonce, file)) {
     await api.uploadChunk(id, uploadToken, index, data);
     onProgress((index + 1) / chunkCount);
   }
 
   const manifest = buildManifest(file, baseNonce, chunkCount);
-  await api.uploadManifest(id, uploadToken, await encryptManifest(key, manifest));
+  await api.uploadManifest(id, uploadToken, await encryptManifest(manifestKey, manifest));
   await api.completeTransfer(id, uploadToken, chunkCount);
 
-  // La chiave va nel frammento: il browser non la invia mai al server
-  return `${window.location.origin}/d/${id}#${await exportFileKey(key)}`;
+  // Il segreto va nel frammento: il browser non lo invia mai al server
+  return `${window.location.origin}/d/${id}#${encodeFragment(secret, Boolean(password))}`;
 }
 
-export async function receiveFile(id, keyB64, onProgress = () => {}) {
-  let key;
+export async function receiveFile(id, fragment, password = '', onProgress = () => {}) {
+  let parsed;
   try {
-    key = await importFileKey(keyB64);
+    parsed = decodeFragment(fragment);
   } catch {
     throw new Error('Chiave nel link non valida');
   }
+  if (parsed.withPassword && !password) throw new Error('Questo file richiede una password');
 
+  const { chunkKey, manifestKey } = await deriveKeys(parsed.secret, parsed.withPassword ? password : '');
   const { manifest: encManifest, chunkCount: serverCount } = await api.getTransfer(id);
 
   let manifest;
   try {
-    manifest = await decryptManifest(key, encManifest);
+    manifest = await decryptManifest(manifestKey, encManifest);
   } catch {
-    throw new Error('Chiave errata o manifest manomesso');
+    throw new Error(parsed.withPassword
+      ? 'Password errata, oppure manifest manomesso'
+      : 'Chiave errata o manifest manomesso');
   }
   // Il numero di chunk autentico è quello nel manifest, non quello del server
   if (serverCount !== manifest.chunkCount) {
@@ -53,7 +66,7 @@ export async function receiveFile(id, keyB64, onProgress = () => {}) {
   for (let n = 0; n < manifest.chunkCount; n++) {
     const ct = await api.getChunk(id, n);
     try {
-      parts.push(await decryptChunk(key, baseNonce, n, n === manifest.chunkCount - 1, ct));
+      parts.push(await decryptChunk(chunkKey, baseNonce, n, n === manifest.chunkCount - 1, ct));
     } catch {
       throw new Error(`Verifica di integrità fallita sul chunk ${n}: file manomesso`);
     }
@@ -66,9 +79,13 @@ export async function receiveFile(id, keyB64, onProgress = () => {}) {
   return { blob, name: manifest.name };
 }
 
+const FORBIDDEN = new Set(['\\', '/', ':', '*', '?', '"', '<', '>', '|']);
+
 function sanitizeName(name) {
-  // eslint-disable-next-line no-control-regex -- rimozione intenzionale dei caratteri di controllo
-  const clean = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim();
+  const clean = Array.from(name, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code < 32 || code === 127 || FORBIDDEN.has(ch) ? '_' : ch;
+  }).join('').trim();
   return (clean || 'file').slice(0, 200);
 }
 
